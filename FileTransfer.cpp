@@ -8,6 +8,8 @@
 #include "PacketLogger.h"
 #include "CRC.h"
 
+const long long MAX_FILE_SIZE = 104857600; // 100 MB
+
 void sendFile(SSL* ssl, const std::string& name)
 {
     std::ifstream file(name.c_str(),
@@ -21,6 +23,7 @@ void sendFile(SSL* ssl, const std::string& name)
 
     DataPacket pkt;
     int seq = 1;
+    long long totalSent = 0;
 
     while (!file.eof())
     {
@@ -30,6 +33,13 @@ void sendFile(SSL* ssl, const std::string& name)
 
         if (bytes <= 0)
             break;
+
+        totalSent += bytes;
+        if (totalSent > MAX_FILE_SIZE)
+        {
+            std::cout << "[ERROR] File exceeds 100MB limit, aborting send\n";
+            break;
+        }
 
         pkt.header.type = FILE_DATA;
 
@@ -50,6 +60,7 @@ void receiveFile(SSL* ssl, const std::string& name)
     std::ofstream file(name.c_str(), std::ios::binary);
 
     DataPacket pkt;
+    long long totalReceived = 0;
 
     while (true)
     {
@@ -60,6 +71,25 @@ void receiveFile(SSL* ssl, const std::string& name)
 
         if (pkt.header.type == FILE_DATA)
         {
+            if (pkt.header.size < 0 || pkt.header.size > MAX_PAYLOAD)
+            {
+                std::cout << "[ERROR] Invalid payload size in FILE_DATA, aborting\n";
+                break;
+            }
+
+            if (!check_crc(pkt))
+            {
+                std::cout << "[ERROR] CRC mismatch in FILE_DATA, aborting\n";
+                break;
+            }
+
+            totalReceived += pkt.header.size;
+            if (totalReceived > MAX_FILE_SIZE)
+            {
+                std::cout << "[ERROR] File exceeds 100MB limit, aborting receive\n";
+                break;
+            }
+
             file.write(pkt.payload, pkt.header.size);
         }
 
