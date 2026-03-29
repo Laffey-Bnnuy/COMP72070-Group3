@@ -10,15 +10,15 @@
 
 const long long MAX_FILE_SIZE = 104857600; // 100 MB
 
-void sendFile(SSL* ssl, const std::string& name)
+bool sendFile(SSL* ssl, const std::string& name)
 {
     std::ifstream file(name.c_str(),
         std::ios::binary);
 
     if (!file)
     {
-        std::cout << "no file\n";
-        return;
+        std::cout << "[ERROR] File not found: " << name << "\n";
+        return false;
     }
 
     DataPacket pkt;
@@ -53,6 +53,8 @@ void sendFile(SSL* ssl, const std::string& name)
 
         PacketLogger::log("SEND", pkt);
     }
+
+    return true;
 }
 
 void receiveFile(SSL* ssl, const std::string& name)

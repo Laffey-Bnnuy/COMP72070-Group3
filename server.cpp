@@ -1,6 +1,7 @@
 #include "Server.h"
 
 #include <iostream>
+#include <cstring>
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
@@ -163,11 +164,11 @@ bool Server::start()
             std::cout << "[STATE] Server state: PROCESSING" << std::endl;
 
             bool transferOk = false;
+            bool validCmd = true;
             if (cmd.rfind("GET ", 0) == 0)
             {
                 std::cout << "[INFO] Sending file: " << filepath << std::endl;
-                sendFile(ssl, filepath);
-                transferOk = true;
+                transferOk = sendFile(ssl, filepath);
             }
             else if (cmd.rfind("PUT ", 0) == 0)
             {
@@ -175,20 +176,29 @@ bool Server::start()
                 receiveFile(ssl, filepath);
                 transferOk = true;
             }
-
-            if (transferOk)
+            else
             {
-                DataPacket resp{};
-                resp.header.type = CMD_RESPONSE;
-                resp.header.seq = 0;
-                const char* okMsg = "OK";
-                memcpy(resp.payload, okMsg, 2);
-                resp.header.size = 2;
-                resp.tail.crc = simple_crc(resp.payload, 2);
-                SSL_write(ssl, &resp, PacketSerializer::size(resp));
-                PacketLogger::log("SEND", resp);
-                std::cout << "[INFO] Transfer complete, sent OK response" << std::endl;
+                validCmd = false;
+                std::cout << "[ERROR] Unknown command: " << cmd << std::endl;
             }
+
+            DataPacket resp{};
+            resp.header.type = CMD_RESPONSE;
+            resp.header.seq = 0;
+            const char* msg;
+            if (!validCmd)
+                msg = "ERR: unknown command";
+            else if (!transferOk)
+                msg = "ERR: file not found";
+            else
+                msg = "OK";
+            int msgLen = (int)strlen(msg);
+            memcpy(resp.payload, msg, msgLen);
+            resp.header.size = msgLen;
+            resp.tail.crc = simple_crc(resp.payload, msgLen);
+            SSL_write(ssl, &resp, PacketSerializer::size(resp));
+            PacketLogger::log("SEND", resp);
+            std::cout << "[INFO] Sent response: " << msg << std::endl;
 
             state.setState(AUTHENTICATED);
             std::cout << "[STATE] Server state: AUTHENTICATED" << std::endl;
