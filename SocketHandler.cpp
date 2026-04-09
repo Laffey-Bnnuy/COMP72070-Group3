@@ -1,5 +1,5 @@
 
-#include "SocketHandler.h"   
+#include "SocketHandler.h"
 #include <iostream>
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -68,7 +68,7 @@ bool SocketHandler::connectToHost(const std::string& host, int port)
     }
 
     addrinfo hints{}, * res = nullptr;
-    hints.ai_family = AF_INET;
+    hints.ai_family   = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
 
     char portStr[8];
@@ -107,17 +107,31 @@ bool SocketHandler::connectToHost(const std::string& host, int port)
     return true;
 }
 
-// sendPacket
 
 bool SocketHandler::sendPacket(const DataPacket& pkt)
 {
     if (!connected || !ssl)
         return false;
 
-    int bytes = PacketSerializer::size(pkt);
-    int written = SSL_write(ssl, &pkt, bytes);
+    // 1. Send header
+    if (SSL_write(ssl, &pkt.header, sizeof(PacketHeader)) <= 0)
+    {
+        printSSLErrors();
+        return false;
+    }
 
-    if (written <= 0)
+    // 2. Send payload (only the bytes actually used)
+    if (pkt.header.size > 0)
+    {
+        if (SSL_write(ssl, pkt.payload, pkt.header.size) <= 0)
+        {
+            printSSLErrors();
+            return false;
+        }
+    }
+
+    // 3. Send tail (contains the real CRC value)
+    if (SSL_write(ssl, &pkt.tail, sizeof(PacketTail)) <= 0)
     {
         printSSLErrors();
         return false;
@@ -127,13 +141,14 @@ bool SocketHandler::sendPacket(const DataPacket& pkt)
     return true;
 }
 
-// recvPacket
+
 
 bool SocketHandler::recvPacket(DataPacket& pkt)
 {
     if (!connected || !ssl)
         return false;
 
+    // 1. Read header
     int r = SSL_read(ssl, &pkt.header, sizeof(PacketHeader));
     if (r <= 0)
     {
@@ -141,16 +156,33 @@ bool SocketHandler::recvPacket(DataPacket& pkt)
         return false;
     }
 
-    int remaining = pkt.header.size + sizeof(PacketTail);
-    r = SSL_read(ssl, pkt.payload, remaining);
+    // Validate payload size before reading
+    if (pkt.header.size < 0 || pkt.header.size > MAX_PAYLOAD)
+    {
+        std::cout << "[ERROR] recvPacket: invalid payload size "
+                  << pkt.header.size << std::endl;
+        connected = false;
+        return false;
+    }
 
+    // 2. Read payload
+    if (pkt.header.size > 0)
+    {
+        r = SSL_read(ssl, pkt.payload, pkt.header.size);
+        if (r <= 0)
+        {
+            connected = false;
+            return false;
+        }
+    }
+
+    // 3. Read tail
+    r = SSL_read(ssl, &pkt.tail, sizeof(PacketTail));
     if (r <= 0)
     {
         connected = false;
         return false;
     }
-
-    memcpy(&pkt.tail, pkt.payload + pkt.header.size, sizeof(PacketTail));
 
     PacketLogger::log("RECV", pkt);
     return true;

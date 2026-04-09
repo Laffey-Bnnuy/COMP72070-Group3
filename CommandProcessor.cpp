@@ -54,12 +54,12 @@ bool CommandProcessor::login(const std::string& username, const std::string& pas
         return false;
     }
 
-    DataPacket req{};
+    DataPacket req;
     req.header.type = AUTH_REQUEST;
-    req.header.seq = 0;
+    req.header.seq  = 0;
     req.header.size = (int)credentials.size();
     memcpy(req.payload, credentials.c_str(), credentials.size());
-    req.tail.crc = simple_crc(req.payload, req.header.size);
+    req.tail.crc    = simple_crc(req.payload, req.header.size);
 
     if (!sock.sendPacket(req))
     {
@@ -68,7 +68,7 @@ bool CommandProcessor::login(const std::string& username, const std::string& pas
         return false;
     }
 
-    DataPacket resp{};
+    DataPacket resp;
     if (!sock.recvPacket(resp))
     {
         std::cout << "[ERROR] No response to AUTH_REQUEST" << std::endl;
@@ -109,12 +109,12 @@ bool CommandProcessor::getFile(const std::string& remoteFilename,
 
     std::string cmd = "GET " + remoteFilename;
 
-    DataPacket req{};
+    DataPacket req;
     req.header.type = CMD_REQUEST;
-    req.header.seq = 0;
+    req.header.seq  = 0;
     req.header.size = (int)cmd.size();
     memcpy(req.payload, cmd.c_str(), cmd.size());
-    req.tail.crc = simple_crc(req.payload, req.header.size);
+    req.tail.crc    = simple_crc(req.payload, req.header.size);
 
     state.setState(TRANSFERRING);
     std::cout << "[STATE] " << state.label() << std::endl;
@@ -135,12 +135,12 @@ bool CommandProcessor::getFile(const std::string& remoteFilename,
     }
 
     long long totalReceived = 0;
-    int       lastSeq = 0;
-    bool      transferOk = false;
+    int       lastSeq       = 0;
+    bool      transferOk    = false;
 
     while (true)
     {
-        DataPacket pkt{};
+        DataPacket pkt;
         if (!sock.recvPacket(pkt))
         {
             std::cout << "[ERROR] Connection lost during file receive" << std::endl;
@@ -163,7 +163,7 @@ bool CommandProcessor::getFile(const std::string& remoteFilename,
 
             if (pkt.header.seq != lastSeq + 1)
                 std::cout << "[WARN] Out-of-order chunk: expected seq="
-                << (lastSeq + 1) << " got " << pkt.header.seq << std::endl;
+                    << (lastSeq + 1) << " got " << pkt.header.seq << std::endl;
 
             lastSeq = pkt.header.seq;
             totalReceived += pkt.header.size;
@@ -190,7 +190,7 @@ bool CommandProcessor::getFile(const std::string& remoteFilename,
 
     if (transferOk)
         std::cout << "[INFO] File saved to " << localOutPath
-        << " (" << totalReceived << " bytes)" << std::endl;
+            << " (" << totalReceived << " bytes)" << std::endl;
     else
         std::cout << "[ERROR] File transfer failed or was incomplete" << std::endl;
 
@@ -217,12 +217,12 @@ bool CommandProcessor::putFile(const std::string& localPath,
 
     std::string cmd = "PUT " + remoteFilename;
 
-    DataPacket req{};
+    DataPacket req;
     req.header.type = CMD_REQUEST;
-    req.header.seq = 0;
+    req.header.seq  = 0;
     req.header.size = (int)cmd.size();
     memcpy(req.payload, cmd.c_str(), cmd.size());
-    req.tail.crc = simple_crc(req.payload, req.header.size);
+    req.tail.crc    = simple_crc(req.payload, req.header.size);
 
     state.setState(TRANSFERRING);
     std::cout << "[STATE] " << state.label() << std::endl;
@@ -240,7 +240,7 @@ bool CommandProcessor::putFile(const std::string& localPath,
 
     while (!inFile.eof())
     {
-        DataPacket pkt{};
+        DataPacket pkt;
         inFile.read(pkt.payload, MAX_PAYLOAD);
         int bytes = (int)inFile.gcount();
 
@@ -254,9 +254,9 @@ bool CommandProcessor::putFile(const std::string& localPath,
         }
 
         pkt.header.type = FILE_DATA;
-        pkt.header.seq = seq++;
+        pkt.header.seq  = seq++;
         pkt.header.size = bytes;
-        pkt.tail.crc = simple_crc(pkt.payload, bytes);
+        pkt.tail.crc    = simple_crc(pkt.payload, bytes);
 
         if (!sock.sendPacket(pkt))
         {
@@ -273,7 +273,7 @@ bool CommandProcessor::putFile(const std::string& localPath,
     inFile.close();
     std::cout << "[INFO] All chunks sent (" << totalSent << " bytes)" << std::endl;
 
-    DataPacket resp{};
+    DataPacket resp;
     if (!sock.recvPacket(resp))
     {
         std::cout << "[ERROR] No CMD_RESPONSE received after PUT" << std::endl;
@@ -287,6 +287,41 @@ bool CommandProcessor::putFile(const std::string& localPath,
     state.setState(AUTHENTICATED);
     std::cout << "[STATE] " << state.label() << std::endl;
     return (msg == "OK");
+}
+
+bool CommandProcessor::setMode(const std::string& modeName)
+{
+    if (state.getState() != AUTHENTICATED)
+    {
+        std::cout << "[ERROR] setMode() called in wrong state: " << state.label() << std::endl;
+        return false;
+    }
+
+    std::string cmd = "MODE " + modeName;
+
+    DataPacket req;
+    req.header.type = CMD_REQUEST;
+    req.header.seq  = 0;
+    req.header.size = (int)cmd.size();
+    memcpy(req.payload, cmd.c_str(), cmd.size());
+    req.tail.crc    = simple_crc(req.payload, req.header.size);
+
+    if (!sock.sendPacket(req))
+    {
+        std::cout << "[ERROR] Failed to send MODE command" << std::endl;
+        return false;
+    }
+
+    DataPacket resp;
+    if (!sock.recvPacket(resp))
+    {
+        std::cout << "[ERROR] No response to MODE command" << std::endl;
+        return false;
+    }
+
+    std::string result(resp.payload, resp.header.size);
+    std::cout << "[MODE] Server response: " << result << std::endl;
+    return (result.rfind("OK", 0) == 0);
 }
 
 void CommandProcessor::disconnect()

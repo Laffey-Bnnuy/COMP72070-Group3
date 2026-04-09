@@ -1,7 +1,7 @@
 #pragma once
 
 #include <string>
-#include <winsock2.h>   
+#include <winsock2.h>
 #include "DataPacket.h"
 
 struct ssl_ctx_st;
@@ -27,5 +27,5 @@ private:
     SSL_CTX* ctx;
     SSL* ssl;
     bool connected;
-    SOCKET sock;  
+    SOCKET sock;
 };

@@ -15,6 +15,10 @@ public:
     bool login(const std::string& username, const std::string& password);
     bool getFile(const std::string& remoteFilename, const std::string& localOutPath);
     bool putFile(const std::string& localPath, const std::string& remoteFilename);
+
+
+    bool setMode(const std::string& modeName);
+
     void disconnect();
 
     const ClientStateMachine& getState() const { return state; }

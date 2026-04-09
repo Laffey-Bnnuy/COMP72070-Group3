@@ -31,15 +31,38 @@ class DataPacket
 public:
 
     PacketHeader header;
-    char payload[MAX_PAYLOAD];
-    PacketTail tail;
+    char*        payload;
+    PacketTail   tail;
 
-    DataPacket()
+    DataPacket() : payload(new char[MAX_PAYLOAD]())
     {
         header.type = 0;
-        header.seq = 0;
+        header.seq  = 0;
         header.size = 0;
-        tail.crc = 0;
+        tail.crc    = 0;
     }
 
+    ~DataPacket()
+    {
+        delete[] payload;
+    }
+
+    DataPacket(const DataPacket& other) : payload(new char[MAX_PAYLOAD]())
+    {
+        header = other.header;
+        memcpy(payload, other.payload, MAX_PAYLOAD);
+        tail   = other.tail;
+    }
+
+
+    DataPacket& operator=(const DataPacket& other)
+    {
+        if (this != &other)
+        {
+            header = other.header;
+            memcpy(payload, other.payload, MAX_PAYLOAD);
+            tail   = other.tail;
+        }
+        return *this;
+    }
 };

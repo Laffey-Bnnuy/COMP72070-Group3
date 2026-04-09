@@ -7,3 +7,5 @@ x64/
 *.pdb
 *.ilk
 *.exe
+cert.pem
+key.pem
