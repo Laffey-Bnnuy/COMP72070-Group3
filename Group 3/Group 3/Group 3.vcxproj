@@ -134,6 +134,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="AuthHandler.cpp" />
+    <ClCompile Include="CommandProcessor.cpp" />
     <ClCompile Include="CRC.cpp" />
     <ClCompile Include="FileTransfer.cpp" />
     <ClCompile Include="main.cpp" />
@@ -146,6 +147,7 @@
     <ClInclude Include="AuthenticationManager.h" />
     <ClInclude Include="AuthHandler.h" />
     <ClInclude Include="ClientStateMachine.h" />
+    <ClInclude Include="CommandProcessor.h" />
     <ClInclude Include="CRC.h" />
     <ClInclude Include="DataPacket.h" />
     <ClInclude Include="FileTransfer.h" />
