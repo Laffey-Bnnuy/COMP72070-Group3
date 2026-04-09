@@ -1,198 +1,297 @@
-#include "SocketHandler.h"
+#include "CommandProcessor.h"
 
 #include <iostream>
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <openssl/ssl.h>
-#include <openssl/err.h>
+#include <fstream>
+#include <cstring>
 
+#include "DataPacket.h"
 #include "PacketSerializer.h"
 #include "PacketLogger.h"
+#include "CRC.h"
+#include "SocketHandler.h"
 
-#pragma comment(lib, "ws2_32.lib")
-
-static void printSSLErrors()
+CommandProcessor::CommandProcessor(SocketHandler& socket)
+    : sock(socket)
 {
-    unsigned long err;
-    while ((err = ERR_get_error()) != 0)
-    {
-        char buf[256];
-        ERR_error_string_n(err, buf, sizeof(buf));
-        std::cout << "[SSL] " << buf << std::endl;
-    }
 }
 
-
-// Constructor / Destructor
-
-
-SocketHandler::SocketHandler()
-    : ctx(nullptr), ssl(nullptr), connected(false), sock(INVALID_SOCKET)
+bool CommandProcessor::connectToServer(const std::string& host, int port)
 {
-    WSADATA wsa{};
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
-        std::cout << "[ERROR] WSAStartup failed" << std::endl;
-
-    SSL_library_init();
-    SSL_load_error_strings();
-    OpenSSL_add_all_algorithms();
-}
-
-SocketHandler::~SocketHandler()
-{
-    disconnect();
-    WSACleanup();
-    if (ctx) { SSL_CTX_free(ctx); ctx = nullptr; }
-}
-
-// connectToHost
-
-
-bool SocketHandler::connectToHost(const std::string& host, int port)
-{
-    const SSL_METHOD* method = TLS_client_method();
-    ctx = SSL_CTX_new(method);
-    if (!ctx)
+    if (state.getState() != IDLE && state.getState() != DISCONNECTED)
     {
-        std::cout << "[ERROR] SSL_CTX_new failed" << std::endl;
-        printSSLErrors();
+        std::cout << "[WARN] Already connected (state=" << state.label() << ")" << std::endl;
         return false;
     }
 
-    // Server uses a self-signed cert so disable peer verification
-    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
+    state.setState(CONNECTING);
+    std::cout << "[STATE] " << state.label() << std::endl;
 
-    sock = (unsigned long long)socket(AF_INET, SOCK_STREAM, 0);
-    if ((SOCKET)sock == INVALID_SOCKET)
+    if (!sock.connectToHost(host, port))
     {
-        std::cout << "[ERROR] socket() failed: " << WSAGetLastError() << std::endl;
+        state.setState(DISCONNECTED);
+        std::cout << "[STATE] " << state.label() << std::endl;
         return false;
     }
 
-    addrinfo hints{}, * res = nullptr;
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    char portStr[8];
-    _itoa_s(port, portStr, 10);
-
-    if (getaddrinfo(host.c_str(), portStr, &hints, &res) != 0 || !res)
-    {
-        std::cout << "[ERROR] getaddrinfo failed for " << host << std::endl;
-        return false;
-    }
-
-    int rc = ::connect((SOCKET)sock, res->ai_addr, (int)res->ai_addrlen);
-    freeaddrinfo(res);
-
-    if (rc == SOCKET_ERROR)
-    {
-        std::cout << "[ERROR] connect() failed: " << WSAGetLastError() << std::endl;
-        closesocket((SOCKET)sock);
-        sock = INVALID_SOCKET;
-        return false;
-    }
-
-    std::cout << "[INFO] TCP connection established to " << host << ":" << port << std::endl;
-
-    DWORD timeout = 30000;
-    setsockopt((SOCKET)sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
-
-    ssl = SSL_new(ctx);
-    SSL_set_fd(ssl, (int)(SOCKET)sock);
-
-    if (SSL_connect(ssl) <= 0)
-    {
-        std::cout << "[ERROR] SSL_connect failed" << std::endl;
-        printSSLErrors();
-        closesocket((SOCKET)sock);
-        sock = INVALID_SOCKET;
-        return false;
-    }
-
-    std::cout << "[INFO] TLS handshake completed (" << SSL_get_cipher(ssl) << ")" << std::endl;
-
-    connected = true;
+    state.setState(AUTHENTICATING);
+    std::cout << "[STATE] " << state.label() << std::endl;
     return true;
 }
 
-
-// sendPacket
-
-
-bool SocketHandler::sendPacket(const DataPacket& pkt)
+bool CommandProcessor::login(const std::string& username, const std::string& password)
 {
-    if (!connected || !ssl)
-        return false;
-
-    int bytes = PacketSerializer::size(pkt);
-    int written = SSL_write(ssl, &pkt, bytes);
-
-    if (written <= 0)
+    if (state.getState() != AUTHENTICATING)
     {
-        std::cout << "[ERROR] SSL_write failed" << std::endl;
-        printSSLErrors();
+        std::cout << "[ERROR] login() called in wrong state: " << state.label() << std::endl;
         return false;
     }
 
-    PacketLogger::log("SEND", pkt);
-    return true;
+    std::string credentials = username + ":" + password;
+
+    if ((int)credentials.size() > MAX_PAYLOAD)
+    {
+        std::cout << "[ERROR] Credentials exceed MAX_PAYLOAD" << std::endl;
+        return false;
+    }
+
+    DataPacket req{};
+    req.header.type = AUTH_REQUEST;
+    req.header.seq = 0;
+    req.header.size = (int)credentials.size();
+    memcpy(req.payload, credentials.c_str(), credentials.size());
+    req.tail.crc = simple_crc(req.payload, req.header.size);
+
+    if (!sock.sendPacket(req))
+    {
+        std::cout << "[ERROR] Failed to send AUTH_REQUEST" << std::endl;
+        state.setState(DISCONNECTED);
+        return false;
+    }
+
+    DataPacket resp{};
+    if (!sock.recvPacket(resp))
+    {
+        std::cout << "[ERROR] No response to AUTH_REQUEST" << std::endl;
+        state.setState(DISCONNECTED);
+        return false;
+    }
+
+    if (resp.header.type != AUTH_RESPONSE)
+    {
+        std::cout << "[ERROR] Expected AUTH_RESPONSE, got type=" << resp.header.type << std::endl;
+        return false;
+    }
+
+    std::string result(resp.payload, resp.header.size);
+
+    if (result == "OK")
+    {
+        state.setState(AUTHENTICATED);
+        std::cout << "[AUTH] Login successful" << std::endl;
+        std::cout << "[STATE] " << state.label() << std::endl;
+        return true;
+    }
+    else
+    {
+        std::cout << "[AUTH] Login failed (" << result << ")" << std::endl;
+        return false;
+    }
 }
 
-// recvPacket
-
-bool SocketHandler::recvPacket(DataPacket& pkt)
+bool CommandProcessor::getFile(const std::string& remoteFilename,
+    const std::string& localOutPath)
 {
-    if (!connected || !ssl)
-        return false;
-
-    // Read header first
-    int r = SSL_read(ssl, &pkt.header, sizeof(PacketHeader));
-    if (r <= 0)
+    if (state.getState() != AUTHENTICATED)
     {
-        std::cout << "[INFO] Connection closed or recv timeout" << std::endl;
-        connected = false;
+        std::cout << "[ERROR] getFile() called in wrong state: " << state.label() << std::endl;
         return false;
     }
 
-    if (pkt.header.size < 0 || pkt.header.size > MAX_PAYLOAD)
+    std::string cmd = "GET " + remoteFilename;
+
+    DataPacket req{};
+    req.header.type = CMD_REQUEST;
+    req.header.seq = 0;
+    req.header.size = (int)cmd.size();
+    memcpy(req.payload, cmd.c_str(), cmd.size());
+    req.tail.crc = simple_crc(req.payload, req.header.size);
+
+    state.setState(TRANSFERRING);
+    std::cout << "[STATE] " << state.label() << std::endl;
+
+    if (!sock.sendPacket(req))
     {
-        std::cout << "[ERROR] Invalid header.size=" << pkt.header.size << std::endl;
-        connected = false;
+        std::cout << "[ERROR] Failed to send CMD_REQUEST" << std::endl;
+        state.setState(AUTHENTICATED);
         return false;
     }
 
-    // Read payload + tail
-    int remaining = pkt.header.size + (int)sizeof(PacketTail);
-    r = SSL_read(ssl, pkt.payload, remaining);
-    if (r <= 0)
+    std::ofstream outFile(localOutPath.c_str(), std::ios::binary);
+    if (!outFile)
     {
-        std::cout << "[ERROR] Failed to read payload+tail" << std::endl;
-        connected = false;
+        std::cout << "[ERROR] Cannot open local file for writing: " << localOutPath << std::endl;
+        state.setState(AUTHENTICATED);
         return false;
     }
 
-    // Copy tail from end of buffer
-    memcpy(&pkt.tail, pkt.payload + pkt.header.size, sizeof(PacketTail));
+    long long totalReceived = 0;
+    int       lastSeq = 0;
+    bool      transferOk = false;
 
-    PacketLogger::log("RECV", pkt);
-    return true;
+    while (true)
+    {
+        DataPacket pkt{};
+        if (!sock.recvPacket(pkt))
+        {
+            std::cout << "[ERROR] Connection lost during file receive" << std::endl;
+            break;
+        }
+
+        if (pkt.header.type == FILE_DATA)
+        {
+            if (pkt.header.size <= 0 || pkt.header.size > MAX_PAYLOAD)
+            {
+                std::cout << "[ERROR] Invalid FILE_DATA size=" << pkt.header.size << std::endl;
+                break;
+            }
+
+            if (!check_crc(pkt))
+            {
+                std::cout << "[ERROR] CRC mismatch in chunk seq=" << pkt.header.seq << std::endl;
+                break;
+            }
+
+            if (pkt.header.seq != lastSeq + 1)
+                std::cout << "[WARN] Out-of-order chunk: expected seq="
+                << (lastSeq + 1) << " got " << pkt.header.seq << std::endl;
+
+            lastSeq = pkt.header.seq;
+            totalReceived += pkt.header.size;
+            outFile.write(pkt.payload, pkt.header.size);
+
+            std::cout << "[XFER] Received chunk seq=" << pkt.header.seq
+                << " size=" << pkt.header.size
+                << " total=" << totalReceived << " bytes" << std::endl;
+        }
+        else if (pkt.header.type == CMD_RESPONSE)
+        {
+            std::string msg(pkt.payload, pkt.header.size);
+            std::cout << "[INFO] CMD_RESPONSE: " << msg << std::endl;
+            transferOk = (msg == "OK");
+            break;
+        }
+        else
+        {
+            std::cout << "[WARN] Unexpected packet type=" << pkt.header.type << std::endl;
+        }
+    }
+
+    outFile.close();
+
+    if (transferOk)
+        std::cout << "[INFO] File saved to " << localOutPath
+        << " (" << totalReceived << " bytes)" << std::endl;
+    else
+        std::cout << "[ERROR] File transfer failed or was incomplete" << std::endl;
+
+    state.setState(AUTHENTICATED);
+    std::cout << "[STATE] " << state.label() << std::endl;
+    return transferOk;
 }
 
-
-// disconnect
-
-void SocketHandler::disconnect()
+bool CommandProcessor::putFile(const std::string& localPath,
+    const std::string& remoteFilename)
 {
-    if (ssl)
+    if (state.getState() != AUTHENTICATED)
     {
-        SSL_shutdown(ssl);
-        SSL_free(ssl);
-        ssl = nullptr;
+        std::cout << "[ERROR] putFile() called in wrong state: " << state.label() << std::endl;
+        return false;
     }
-    if ((SOCKET)sock != INVALID_SOCKET)
+
+    std::ifstream inFile(localPath.c_str(), std::ios::binary);
+    if (!inFile)
     {
-        closesocket((SOCKET)sock);
-        sock = INVALID_SOCKET;
+        std::cout << "[ERROR] Cannot open local file: " << localPath << std::endl;
+        return false;
     }
-    connected = false;
+
+    std::string cmd = "PUT " + remoteFilename;
+
+    DataPacket req{};
+    req.header.type = CMD_REQUEST;
+    req.header.seq = 0;
+    req.header.size = (int)cmd.size();
+    memcpy(req.payload, cmd.c_str(), cmd.size());
+    req.tail.crc = simple_crc(req.payload, req.header.size);
+
+    state.setState(TRANSFERRING);
+    std::cout << "[STATE] " << state.label() << std::endl;
+
+    if (!sock.sendPacket(req))
+    {
+        std::cout << "[ERROR] Failed to send CMD_REQUEST" << std::endl;
+        state.setState(AUTHENTICATED);
+        return false;
+    }
+
+    const long long MAX_FILE_SIZE = 104857600;
+    long long totalSent = 0;
+    int seq = 1;
+
+    while (!inFile.eof())
+    {
+        DataPacket pkt{};
+        inFile.read(pkt.payload, MAX_PAYLOAD);
+        int bytes = (int)inFile.gcount();
+
+        if (bytes <= 0) break;
+
+        totalSent += bytes;
+        if (totalSent > MAX_FILE_SIZE)
+        {
+            std::cout << "[ERROR] File exceeds 100 MB limit, aborting" << std::endl;
+            break;
+        }
+
+        pkt.header.type = FILE_DATA;
+        pkt.header.seq = seq++;
+        pkt.header.size = bytes;
+        pkt.tail.crc = simple_crc(pkt.payload, bytes);
+
+        if (!sock.sendPacket(pkt))
+        {
+            std::cout << "[ERROR] Failed to send FILE_DATA chunk seq=" << pkt.header.seq << std::endl;
+            state.setState(AUTHENTICATED);
+            return false;
+        }
+
+        std::cout << "[XFER] Sent chunk seq=" << pkt.header.seq
+            << " size=" << bytes
+            << " total=" << totalSent << " bytes" << std::endl;
+    }
+
+    inFile.close();
+    std::cout << "[INFO] All chunks sent (" << totalSent << " bytes)" << std::endl;
+
+    DataPacket resp{};
+    if (!sock.recvPacket(resp))
+    {
+        std::cout << "[ERROR] No CMD_RESPONSE received after PUT" << std::endl;
+        state.setState(AUTHENTICATED);
+        return false;
+    }
+
+    std::string msg(resp.payload, resp.header.size);
+    std::cout << "[INFO] CMD_RESPONSE: " << msg << std::endl;
+
+    state.setState(AUTHENTICATED);
+    std::cout << "[STATE] " << state.label() << std::endl;
+    return (msg == "OK");
+}
+
+void CommandProcessor::disconnect()
+{
+    sock.disconnect();
+    state.setState(DISCONNECTED);
+    std::cout << "[STATE] " << state.label() << std::endl;
 }

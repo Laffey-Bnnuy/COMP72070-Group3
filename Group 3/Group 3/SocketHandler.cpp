@@ -1,5 +1,5 @@
-#include "SocketHandler.h"
 
+#include "SocketHandler.h"   
 #include <iostream>
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -22,9 +22,7 @@ static void printSSLErrors()
     }
 }
 
-
 // Constructor / Destructor
-
 
 SocketHandler::SocketHandler()
     : ctx(nullptr), ssl(nullptr), connected(false), sock(INVALID_SOCKET)
@@ -45,14 +43,13 @@ SocketHandler::~SocketHandler()
     if (ctx) { SSL_CTX_free(ctx); ctx = nullptr; }
 }
 
-
 // connectToHost
-
 
 bool SocketHandler::connectToHost(const std::string& host, int port)
 {
     const SSL_METHOD* method = TLS_client_method();
     ctx = SSL_CTX_new(method);
+
     if (!ctx)
     {
         std::cout << "[ERROR] SSL_CTX_new failed" << std::endl;
@@ -60,11 +57,11 @@ bool SocketHandler::connectToHost(const std::string& host, int port)
         return false;
     }
 
-    // Server uses a self-signed cert so disable peer verification
     SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
 
-    sock = (unsigned long long)socket(AF_INET, SOCK_STREAM, 0);
-    if ((SOCKET)sock == INVALID_SOCKET)
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+
+    if (sock == INVALID_SOCKET)
     {
         std::cout << "[ERROR] socket() failed: " << WSAGetLastError() << std::endl;
         return false;
@@ -73,51 +70,44 @@ bool SocketHandler::connectToHost(const std::string& host, int port)
     addrinfo hints{}, * res = nullptr;
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
+
     char portStr[8];
     _itoa_s(port, portStr, 10);
 
     if (getaddrinfo(host.c_str(), portStr, &hints, &res) != 0 || !res)
     {
-        std::cout << "[ERROR] getaddrinfo failed for " << host << std::endl;
+        std::cout << "[ERROR] getaddrinfo failed" << std::endl;
         return false;
     }
 
-    int rc = ::connect((SOCKET)sock, res->ai_addr, (int)res->ai_addrlen);
+    int rc = connect(sock, res->ai_addr, (int)res->ai_addrlen);
     freeaddrinfo(res);
 
     if (rc == SOCKET_ERROR)
     {
         std::cout << "[ERROR] connect() failed: " << WSAGetLastError() << std::endl;
-        closesocket((SOCKET)sock);
+        closesocket(sock);
         sock = INVALID_SOCKET;
         return false;
     }
 
-    std::cout << "[INFO] TCP connection established to " << host << ":" << port << std::endl;
-
-    DWORD timeout = 30000;
-    setsockopt((SOCKET)sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+    std::cout << "[INFO] Connected to " << host << ":" << port << std::endl;
 
     ssl = SSL_new(ctx);
-    SSL_set_fd(ssl, (int)(SOCKET)sock);
+    SSL_set_fd(ssl, (int)sock);
 
     if (SSL_connect(ssl) <= 0)
     {
         std::cout << "[ERROR] SSL_connect failed" << std::endl;
         printSSLErrors();
-        closesocket((SOCKET)sock);
-        sock = INVALID_SOCKET;
         return false;
     }
-
-    std::cout << "[INFO] TLS handshake completed (" << SSL_get_cipher(ssl) << ")" << std::endl;
 
     connected = true;
     return true;
 }
--
-// sendPacket
 
+// sendPacket
 
 bool SocketHandler::sendPacket(const DataPacket& pkt)
 {
@@ -129,7 +119,6 @@ bool SocketHandler::sendPacket(const DataPacket& pkt)
 
     if (written <= 0)
     {
-        std::cout << "[ERROR] SSL_write failed" << std::endl;
         printSSLErrors();
         return false;
     }
@@ -138,51 +127,36 @@ bool SocketHandler::sendPacket(const DataPacket& pkt)
     return true;
 }
 
-
 // recvPacket
-
 
 bool SocketHandler::recvPacket(DataPacket& pkt)
 {
     if (!connected || !ssl)
         return false;
 
-    // Read header first
     int r = SSL_read(ssl, &pkt.header, sizeof(PacketHeader));
     if (r <= 0)
     {
-        std::cout << "[INFO] Connection closed or recv timeout" << std::endl;
         connected = false;
         return false;
     }
 
-    if (pkt.header.size < 0 || pkt.header.size > MAX_PAYLOAD)
-    {
-        std::cout << "[ERROR] Invalid header.size=" << pkt.header.size << std::endl;
-        connected = false;
-        return false;
-    }
-
-    // Read payload + tail
-    int remaining = pkt.header.size + (int)sizeof(PacketTail);
+    int remaining = pkt.header.size + sizeof(PacketTail);
     r = SSL_read(ssl, pkt.payload, remaining);
+
     if (r <= 0)
     {
-        std::cout << "[ERROR] Failed to read payload+tail" << std::endl;
         connected = false;
         return false;
     }
 
-    // Copy tail from end of buffer
     memcpy(&pkt.tail, pkt.payload + pkt.header.size, sizeof(PacketTail));
 
     PacketLogger::log("RECV", pkt);
     return true;
 }
 
-
 // disconnect
-
 
 void SocketHandler::disconnect()
 {
@@ -192,10 +166,12 @@ void SocketHandler::disconnect()
         SSL_free(ssl);
         ssl = nullptr;
     }
-    if ((SOCKET)sock != INVALID_SOCKET)
+
+    if (sock != INVALID_SOCKET)
     {
-        closesocket((SOCKET)sock);
+        closesocket(sock);
         sock = INVALID_SOCKET;
     }
+
     connected = false;
 }

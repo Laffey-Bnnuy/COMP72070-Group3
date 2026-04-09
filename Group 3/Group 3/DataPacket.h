@@ -31,7 +31,7 @@ class DataPacket
 public:
 
     PacketHeader header;
-    char payload[MAX_PAYLOAD];
+    char payload[MAX_PAYLOAD] = {};
     PacketTail tail;
 
     DataPacket()

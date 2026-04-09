@@ -1,19 +1,24 @@
-#ifdef BUILD_CLIENT
-
 #include <iostream>
 #include <string>
-
 #include "SocketHandler.h"
 #include "CommandProcessor.h"
+#include "Server.h"
 
-int main()
+int main(int argc, char* argv[])
 {
+    if (argc > 1 && std::string(argv[1]) == "--server")
+    {
+        Server s;
+        s.start();
+        return 0;
+    }
+
     std::string host = "127.0.0.1";
     int         port = 54000;
 
-    std::cout << "====================================\n";
+
     std::cout << "  COMP72070 Group 3 - File Client  \n";
-    std::cout << "====================================\n";
+  
     std::cout << "Server: " << host << ":" << port << "\n";
 
     SocketHandler    sock;
@@ -25,10 +30,8 @@ int main()
         return 1;
     }
 
- 
     const int MAX_ATTEMPTS = 3;
     bool loggedIn = false;
-
     for (int attempt = 0; attempt < MAX_ATTEMPTS; ++attempt)
     {
         std::string username, password;
@@ -104,18 +107,3 @@ int main()
     std::cout << "[INFO] Goodbye.\n";
     return 0;
 }
-
-#else
-
-#include "Server.h"
-
-int main()
-{
-    Server s;
-
-    s.start();
-
-    return 0;
-}
-
-#endif
