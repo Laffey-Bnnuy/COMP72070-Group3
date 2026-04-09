@@ -1,7 +1,13 @@
 #pragma once
 
 #include <string>
-#include <openssl/ssl.h>
+#include "DataPacket.h"
+
+
+struct ssl_ctx_st;
+struct ssl_st;
+typedef ssl_ctx_st SSL_CTX;
+typedef ssl_st     SSL;
 
 
 class SocketHandler
@@ -11,19 +17,15 @@ public:
     SocketHandler();
     ~SocketHandler();
 
-    // Establish TLS connection to host:port.
 
-    bool connect(const std::string& host, int port);
+    bool connectToHost(const std::string& host, int port);
 
-    // Send exactly PacketSerializer::size(pkt) bytes.
-  
-    bool send(const DataPacket& pkt);
+   
+    bool sendPacket(const DataPacket& pkt);
 
-    // Block until a full DataPacket is received.
+    bool recvPacket(DataPacket& pkt);
 
-    bool recv(DataPacket& pkt);
 
-    // Graceful TLS shutdown + socket close.
     void disconnect();
 
     bool isConnected() const { return connected; }
@@ -31,9 +33,7 @@ public:
 private:
 
     SSL_CTX* ctx;
-    SSL*     ssl;
-    bool     connected;
-
-
+    SSL* ssl;
+    bool               connected;
     unsigned long long sock; 
 };

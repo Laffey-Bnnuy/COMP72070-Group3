@@ -6,13 +6,10 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
-#include "DataPacket.h"
 #include "PacketSerializer.h"
 #include "PacketLogger.h"
 
 #pragma comment(lib, "ws2_32.lib")
-
-
 
 static void printSSLErrors()
 {
@@ -32,7 +29,6 @@ static void printSSLErrors()
 SocketHandler::SocketHandler()
     : ctx(nullptr), ssl(nullptr), connected(false), sock(INVALID_SOCKET)
 {
-    // One-time Winsock init 
     WSADATA wsa{};
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
         std::cout << "[ERROR] WSAStartup failed" << std::endl;
@@ -49,12 +45,12 @@ SocketHandler::~SocketHandler()
     if (ctx) { SSL_CTX_free(ctx); ctx = nullptr; }
 }
 
-// connect
+
+// connectToHost
 
 
-bool SocketHandler::connect(const std::string& host, int port)
+bool SocketHandler::connectToHost(const std::string& host, int port)
 {
-    // --- SSL context ---
     const SSL_METHOD* method = TLS_client_method();
     ctx = SSL_CTX_new(method);
     if (!ctx)
@@ -64,10 +60,9 @@ bool SocketHandler::connect(const std::string& host, int port)
         return false;
     }
 
-
+    // Server uses a self-signed cert so disable peer verification
     SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
 
-    //TCP socket 
     sock = (unsigned long long)socket(AF_INET, SOCK_STREAM, 0);
     if ((SOCKET)sock == INVALID_SOCKET)
     {
@@ -75,9 +70,8 @@ bool SocketHandler::connect(const std::string& host, int port)
         return false;
     }
 
-    // Resolve host name
     addrinfo hints{}, * res = nullptr;
-    hints.ai_family   = AF_INET;
+    hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
     char portStr[8];
     _itoa_s(port, portStr, 10);
@@ -101,11 +95,9 @@ bool SocketHandler::connect(const std::string& host, int port)
 
     std::cout << "[INFO] TCP connection established to " << host << ":" << port << std::endl;
 
- 
     DWORD timeout = 30000;
     setsockopt((SOCKET)sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
 
-    //LS handshake 
     ssl = SSL_new(ctx);
     SSL_set_fd(ssl, (int)(SOCKET)sock);
 
@@ -118,17 +110,16 @@ bool SocketHandler::connect(const std::string& host, int port)
         return false;
     }
 
-    std::cout << "[INFO] TLS handshake completed ("
-              << SSL_get_cipher(ssl) << ")" << std::endl;
+    std::cout << "[INFO] TLS handshake completed (" << SSL_get_cipher(ssl) << ")" << std::endl;
 
     connected = true;
     return true;
 }
+-
+// sendPacket
 
 
-// send
-
-bool SocketHandler::send(const DataPacket& pkt)
+bool SocketHandler::sendPacket(const DataPacket& pkt)
 {
     if (!connected || !ssl)
         return false;
@@ -148,17 +139,16 @@ bool SocketHandler::send(const DataPacket& pkt)
 }
 
 
-// recv
+// recvPacket
 
-bool SocketHandler::recv(DataPacket& pkt)
+
+bool SocketHandler::recvPacket(DataPacket& pkt)
 {
     if (!connected || !ssl)
         return false;
 
-  
-    int headerBytes = (int)sizeof(PacketHeader);
-    int r = SSL_read(ssl, &pkt.header, headerBytes);
-
+    // Read header first
+    int r = SSL_read(ssl, &pkt.header, sizeof(PacketHeader));
     if (r <= 0)
     {
         std::cout << "[INFO] Connection closed or recv timeout" << std::endl;
@@ -166,18 +156,16 @@ bool SocketHandler::recv(DataPacket& pkt)
         return false;
     }
 
-   
     if (pkt.header.size < 0 || pkt.header.size > MAX_PAYLOAD)
     {
-        std::cout << "[ERROR] Invalid header.size=" << pkt.header.size << ", dropping" << std::endl;
+        std::cout << "[ERROR] Invalid header.size=" << pkt.header.size << std::endl;
         connected = false;
         return false;
     }
 
-
+    // Read payload + tail
     int remaining = pkt.header.size + (int)sizeof(PacketTail);
     r = SSL_read(ssl, pkt.payload, remaining);
-
     if (r <= 0)
     {
         std::cout << "[ERROR] Failed to read payload+tail" << std::endl;
@@ -185,7 +173,7 @@ bool SocketHandler::recv(DataPacket& pkt)
         return false;
     }
 
-
+    // Copy tail from end of buffer
     memcpy(&pkt.tail, pkt.payload + pkt.header.size, sizeof(PacketTail));
 
     PacketLogger::log("RECV", pkt);
@@ -194,6 +182,8 @@ bool SocketHandler::recv(DataPacket& pkt)
 
 
 // disconnect
+
+
 void SocketHandler::disconnect()
 {
     if (ssl)
