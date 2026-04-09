@@ -36,6 +36,9 @@
     <ClCompile Include="FileTransfer.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="SocketHandler.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="AuthenticationManager.h">

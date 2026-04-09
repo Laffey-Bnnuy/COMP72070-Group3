@@ -140,6 +140,7 @@
     <ClCompile Include="PacketLogger.cpp" />
     <ClCompile Include="PacketUtils.cpp" />
     <ClCompile Include="server.cpp" />
+    <ClCompile Include="SocketHandler.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="AuthenticationManager.h" />
