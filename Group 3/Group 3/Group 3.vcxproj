@@ -153,6 +153,7 @@
     <ClInclude Include="PacketUtils.h" />
     <ClInclude Include="server.h" />
     <ClInclude Include="ServerStateMachine.h" />
+    <ClInclude Include="SocketHandler.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
