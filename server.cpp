@@ -17,8 +17,82 @@
 #include "PacketLogger.h"
 #include "ServerStateMachine.h"
 #include "AuthenticationManager.h"
+#include "ServerMode.h"
 
 #pragma comment(lib,"ws2_32.lib")
+
+
+
+static bool sslReadExact(SSL* ssl, void* buf, int len)
+{
+    int total = 0;
+    while (total < len)
+    {
+        int r = SSL_read(ssl, static_cast<char*>(buf) + total, len - total);
+        if (r <= 0) return false;
+        total += r;
+    }
+    return true;
+}
+
+static bool sslWriteExact(SSL* ssl, const void* buf, int len)
+{
+    int total = 0;
+    while (total < len)
+    {
+        int r = SSL_write(ssl, static_cast<const char*>(buf) + total, len - total);
+        if (r <= 0) return false;
+        total += r;
+    }
+    return true;
+}
+
+static bool serverSendPacket(SSL* ssl, const DataPacket& pkt)
+{
+    if (!sslWriteExact(ssl, &pkt.header, sizeof(PacketHeader))) return false;
+    if (pkt.header.size > 0)
+        if (!sslWriteExact(ssl, pkt.payload, pkt.header.size)) return false;
+    if (!sslWriteExact(ssl, &pkt.tail, sizeof(PacketTail))) return false;
+    PacketLogger::log("SEND", pkt);
+    return true;
+}
+
+
+static bool serverRecvPacket(SSL* ssl, DataPacket& pkt)
+{
+    
+    if (!sslReadExact(ssl, &pkt.header, sizeof(PacketHeader))) return false;
+
+   
+    if (pkt.header.size < 0 || pkt.header.size > MAX_PAYLOAD)
+    {
+        std::cout << "[ERROR] Invalid payload size: " << pkt.header.size
+                  << ", dropping connection" << std::endl;
+        return false;
+    }
+    if (pkt.header.size > 0)
+    {
+        if (!sslReadExact(ssl, pkt.payload, pkt.header.size)) return false;
+    }
+
+   
+    if (!sslReadExact(ssl, &pkt.tail, sizeof(PacketTail))) return false;
+
+    PacketLogger::log("RECV", pkt);
+    return true;
+}
+
+static DataPacket makeResponse(const char* msg)
+{
+    DataPacket resp;
+    resp.header.type = CMD_RESPONSE;
+    resp.header.seq  = 0;
+    int len = (int)strlen(msg);
+    memcpy(resp.payload, msg, len);
+    resp.header.size = len;
+    resp.tail.crc    = simple_crc(resp.payload, len);
+    return resp;
+}
 
 bool Server::start()
 {
@@ -30,11 +104,9 @@ bool Server::start()
         std::cout << "[ERROR] WSAStartup failed!" << std::endl;
         return false;
     }
-    std::cout << "[INFO] WSAStartup successful" << std::endl;
 
     SSL_library_init();
     SSL_load_error_strings();
-    std::cout << "[INFO] OpenSSL initialized" << std::endl;
 
     const SSL_METHOD* method = TLS_server_method();
     SSL_CTX* ctx = SSL_CTX_new(method);
@@ -43,7 +115,6 @@ bool Server::start()
         std::cout << "[ERROR] SSL_CTX_new failed" << std::endl;
         return false;
     }
-    std::cout << "[INFO] SSL context created" << std::endl;
 
     if (SSL_CTX_use_certificate_file(ctx, "cert.pem", SSL_FILETYPE_PEM) <= 0)
     {
@@ -55,7 +126,6 @@ bool Server::start()
         std::cout << "[ERROR] Failed to load private key" << std::endl;
         return false;
     }
-    std::cout << "[INFO] Certificate and private key loaded" << std::endl;
 
     SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
     if (s == INVALID_SOCKET)
@@ -63,11 +133,10 @@ bool Server::start()
         std::cout << "[ERROR] Socket creation failed" << std::endl;
         return false;
     }
-    std::cout << "[INFO] Socket created" << std::endl;
 
     sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(54000);
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(54000);
     addr.sin_addr.s_addr = INADDR_ANY;
 
     if (bind(s, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR)
@@ -109,44 +178,79 @@ bool Server::start()
     state.setState(CONNECTED);
     std::cout << "[STATE] Server state: CONNECTED" << std::endl;
 
-    DataPacket pkt;
+    // Default = READWRITE
+    ServerMode currentMode = MODE_READWRITE;
+    std::cout << "[MODE] Server mode: READWRITE" << std::endl;
 
     while (true)
     {
-        int r = SSL_read(ssl, &pkt, sizeof(pkt));
-        if (r <= 0)
+        DataPacket pkt;
+
+        if (!serverRecvPacket(ssl, pkt))
         {
             std::cout << "[INFO] Connection closed or read error" << std::endl;
             break;
         }
 
-        PacketLogger::log("RECV", pkt);
-
-        if (pkt.header.size < 0 || pkt.header.size > MAX_PAYLOAD)
-        {
-            std::cout << "[ERROR] Invalid payload size: " << pkt.header.size << ", dropping packet" << std::endl;
-            continue;
-        }
-
         if (!check_crc(pkt))
         {
             std::cout << "[ERROR] CRC mismatch, dropping packet" << std::endl;
+            // Send an error back so it is not left hanging. aka prevent deadlock
+            if (pkt.header.type == CMD_REQUEST)
+            {
+                DataPacket errResp = makeResponse("ERR: CRC mismatch");
+                serverSendPacket(ssl, errResp);
+            }
             continue;
         }
+
 
         if (pkt.header.type == AUTH_REQUEST)
         {
             std::cout << "[INFO] Received AUTH_REQUEST" << std::endl;
             handleAuth(ssl, pkt, auth, state);
             std::cout << "[STATE] Current server state: "
-                << (state.getState() == AUTHENTICATED ? "AUTHENTICATED" : "CONNECTED")
-                << std::endl;
+                      << (state.getState() == AUTHENTICATED ? "AUTHENTICATED" : "CONNECTED")
+                      << std::endl;
         }
         else if (pkt.header.type == CMD_REQUEST && state.getState() == AUTHENTICATED)
         {
             std::string cmd(pkt.payload, pkt.header.size);
             std::cout << "[INFO] Received CMD_REQUEST: " << cmd << std::endl;
 
+            if (cmd.rfind("MODE ", 0) == 0)
+            {
+                state.setState(PROCESSING);
+                std::cout << "[STATE] Server state: PROCESSING (mode change)" << std::endl;
+
+                std::string modeName = cmd.substr(5);
+                const char* responseMsg = nullptr;
+
+                if (modeName == "READONLY")
+                {
+                    currentMode  = MODE_READONLY;
+                    responseMsg  = "OK: mode set to READONLY";
+                    std::cout << "[MODE] Server mode changed to: READONLY" << std::endl;
+                }
+                else if (modeName == "READWRITE")
+                {
+                    currentMode  = MODE_READWRITE;
+                    responseMsg  = "OK: mode set to READWRITE";
+                    std::cout << "[MODE] Server mode changed to: READWRITE" << std::endl;
+                }
+                else
+                {
+                    responseMsg = "ERR: unknown mode (use READONLY or READWRITE)";
+                    std::cout << "[ERROR] Unknown mode: " << modeName << std::endl;
+                }
+
+                DataPacket resp = makeResponse(responseMsg);
+                serverSendPacket(ssl, resp);
+
+                state.setState(AUTHENTICATED);
+                std::cout << "[STATE] Server state: AUTHENTICATED" << std::endl;
+                continue;
+            }
             if (cmd.length() <= 4)
             {
                 std::cout << "[ERROR] Command too short, ignoring" << std::endl;
@@ -157,51 +261,60 @@ bool Server::start()
             if (filepath.find("..") != std::string::npos || filepath[0] == '/')
             {
                 std::cout << "[ERROR] Blocked unsafe file path: " << filepath << std::endl;
+                DataPacket resp = makeResponse("ERR: unsafe path");
+                serverSendPacket(ssl, resp);
                 continue;
             }
 
             state.setState(PROCESSING);
             std::cout << "[STATE] Server state: PROCESSING" << std::endl;
 
-            bool transferOk = false;
-            bool validCmd = true;
+            bool   transferOk = false;
+            bool   validCmd   = true;
+            const char* responseMsg = nullptr;
+
             if (cmd.rfind("GET ", 0) == 0)
             {
                 std::cout << "[INFO] Sending file: " << filepath << std::endl;
                 transferOk = sendFile(ssl, filepath);
+                responseMsg = transferOk ? "OK" : "ERR: file not found";
             }
             else if (cmd.rfind("PUT ", 0) == 0)
             {
-                std::cout << "[INFO] Receiving file: " << filepath << std::endl;
-                receiveFile(ssl, filepath);
-                transferOk = true;
+                // reject writes in READONLY mode
+                if (currentMode == MODE_READONLY)
+                {
+                    std::cout << "[WARN] PUT rejected: server is in READONLY mode" << std::endl;
+                    responseMsg = "ERR: server is in READONLY mode";
+                    transferOk  = false;
+                }
+                else
+                {
+                    std::cout << "[INFO] Receiving file: " << filepath << std::endl;
+                    receiveFile(ssl, filepath);
+                    transferOk  = true;
+                    responseMsg = "OK";
+                }
             }
             else
             {
-                validCmd = false;
+                validCmd    = false;
+                responseMsg = "ERR: unknown command";
                 std::cout << "[ERROR] Unknown command: " << cmd << std::endl;
             }
 
-            DataPacket resp{};
-            resp.header.type = CMD_RESPONSE;
-            resp.header.seq = 0;
-            const char* msg;
-            if (!validCmd)
-                msg = "ERR: unknown command";
-            else if (!transferOk)
-                msg = "ERR: file not found";
-            else
-                msg = "OK";
-            int msgLen = (int)strlen(msg);
-            memcpy(resp.payload, msg, msgLen);
-            resp.header.size = msgLen;
-            resp.tail.crc = simple_crc(resp.payload, msgLen);
-            SSL_write(ssl, &resp, PacketSerializer::size(resp));
-            PacketLogger::log("SEND", resp);
-            std::cout << "[INFO] Sent response: " << msg << std::endl;
+            DataPacket resp = makeResponse(responseMsg);
+            serverSendPacket(ssl, resp);
+            std::cout << "[INFO] Sent response: " << responseMsg << std::endl;
 
             state.setState(AUTHENTICATED);
             std::cout << "[STATE] Server state: AUTHENTICATED" << std::endl;
+        }
+        else if (pkt.header.type == CMD_REQUEST && state.getState() != AUTHENTICATED)
+        {
+            std::cout << "[WARN] CMD_REQUEST rejected: not authenticated" << std::endl;
+            DataPacket resp = makeResponse("ERR: not authenticated");
+            serverSendPacket(ssl, resp);
         }
     }
 
