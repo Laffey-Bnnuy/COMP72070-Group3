@@ -273,6 +273,20 @@ bool CommandProcessor::putFile(const std::string& localPath,
     inFile.close();
     std::cout << "[INFO] All chunks sent (" << totalSent << " bytes)" << std::endl;
 
+    
+    DataPacket ack;
+    ack.header.type = ACK;
+    ack.header.seq  = 0;
+    ack.header.size = 0;
+    ack.tail.crc    = 0;
+    if (!sock.sendPacket(ack))
+    {
+        std::cout << "[ERROR] Failed to send ACK after PUT" << std::endl;
+        state.setState(AUTHENTICATED);
+        return false;
+    }
+    std::cout << "[XFER] Sent ACK (end-of-transfer)" << std::endl;
+
     DataPacket resp;
     if (!sock.recvPacket(resp))
     {

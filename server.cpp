@@ -22,12 +22,37 @@
 #pragma comment(lib,"ws2_32.lib")
 
 
+
+static bool sslReadExact(SSL* ssl, void* buf, int len)
+{
+    int total = 0;
+    while (total < len)
+    {
+        int r = SSL_read(ssl, static_cast<char*>(buf) + total, len - total);
+        if (r <= 0) return false;
+        total += r;
+    }
+    return true;
+}
+
+static bool sslWriteExact(SSL* ssl, const void* buf, int len)
+{
+    int total = 0;
+    while (total < len)
+    {
+        int r = SSL_write(ssl, static_cast<const char*>(buf) + total, len - total);
+        if (r <= 0) return false;
+        total += r;
+    }
+    return true;
+}
+
 static bool serverSendPacket(SSL* ssl, const DataPacket& pkt)
 {
-    if (SSL_write(ssl, &pkt.header, sizeof(PacketHeader)) <= 0) return false;
+    if (!sslWriteExact(ssl, &pkt.header, sizeof(PacketHeader))) return false;
     if (pkt.header.size > 0)
-        if (SSL_write(ssl, pkt.payload, pkt.header.size) <= 0) return false;
-    if (SSL_write(ssl, &pkt.tail, sizeof(PacketTail)) <= 0) return false;
+        if (!sslWriteExact(ssl, pkt.payload, pkt.header.size)) return false;
+    if (!sslWriteExact(ssl, &pkt.tail, sizeof(PacketTail))) return false;
     PacketLogger::log("SEND", pkt);
     return true;
 }
@@ -35,11 +60,10 @@ static bool serverSendPacket(SSL* ssl, const DataPacket& pkt)
 
 static bool serverRecvPacket(SSL* ssl, DataPacket& pkt)
 {
-    // 1. Read header
-    int r = SSL_read(ssl, &pkt.header, sizeof(PacketHeader));
-    if (r <= 0) return false;
+    
+    if (!sslReadExact(ssl, &pkt.header, sizeof(PacketHeader))) return false;
 
-    // 2. Validate and read payload
+   
     if (pkt.header.size < 0 || pkt.header.size > MAX_PAYLOAD)
     {
         std::cout << "[ERROR] Invalid payload size: " << pkt.header.size
@@ -48,13 +72,11 @@ static bool serverRecvPacket(SSL* ssl, DataPacket& pkt)
     }
     if (pkt.header.size > 0)
     {
-        r = SSL_read(ssl, pkt.payload, pkt.header.size);
-        if (r <= 0) return false;
+        if (!sslReadExact(ssl, pkt.payload, pkt.header.size)) return false;
     }
 
-    // 3. Read tail
-    r = SSL_read(ssl, &pkt.tail, sizeof(PacketTail));
-    if (r <= 0) return false;
+   
+    if (!sslReadExact(ssl, &pkt.tail, sizeof(PacketTail))) return false;
 
     PacketLogger::log("RECV", pkt);
     return true;
@@ -173,6 +195,12 @@ bool Server::start()
         if (!check_crc(pkt))
         {
             std::cout << "[ERROR] CRC mismatch, dropping packet" << std::endl;
+            // Send an error back so it is not left hanging. aka prevent deadlock
+            if (pkt.header.type == CMD_REQUEST)
+            {
+                DataPacket errResp = makeResponse("ERR: CRC mismatch");
+                serverSendPacket(ssl, errResp);
+            }
             continue;
         }
 

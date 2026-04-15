@@ -22,7 +22,32 @@ static void printSSLErrors()
     }
 }
 
-// Constructor / Destructor
+
+static bool sslReadExact(SSL* ssl, void* buf, int len)
+{
+    int total = 0;
+    while (total < len)
+    {
+        int r = SSL_read(ssl, static_cast<char*>(buf) + total, len - total);
+        if (r <= 0) return false;
+        total += r;
+    }
+    return true;
+}
+
+static bool sslWriteExact(SSL* ssl, const void* buf, int len)
+{
+    int total = 0;
+    while (total < len)
+    {
+        int r = SSL_write(ssl, static_cast<const char*>(buf) + total, len - total);
+        if (r <= 0) return false;
+        total += r;
+    }
+    return true;
+}
+
+
 
 SocketHandler::SocketHandler()
     : ctx(nullptr), ssl(nullptr), connected(false), sock(INVALID_SOCKET)
@@ -113,25 +138,25 @@ bool SocketHandler::sendPacket(const DataPacket& pkt)
     if (!connected || !ssl)
         return false;
 
-    // 1. Send header
-    if (SSL_write(ssl, &pkt.header, sizeof(PacketHeader)) <= 0)
+    
+    if (!sslWriteExact(ssl, &pkt.header, sizeof(PacketHeader)))
     {
         printSSLErrors();
         return false;
     }
 
-    // 2. Send payload (only the bytes actually used)
+   
     if (pkt.header.size > 0)
     {
-        if (SSL_write(ssl, pkt.payload, pkt.header.size) <= 0)
+        if (!sslWriteExact(ssl, pkt.payload, pkt.header.size))
         {
             printSSLErrors();
             return false;
         }
     }
 
-    // 3. Send tail (contains the real CRC value)
-    if (SSL_write(ssl, &pkt.tail, sizeof(PacketTail)) <= 0)
+    
+    if (!sslWriteExact(ssl, &pkt.tail, sizeof(PacketTail)))
     {
         printSSLErrors();
         return false;
@@ -148,15 +173,14 @@ bool SocketHandler::recvPacket(DataPacket& pkt)
     if (!connected || !ssl)
         return false;
 
-    // 1. Read header
-    int r = SSL_read(ssl, &pkt.header, sizeof(PacketHeader));
-    if (r <= 0)
+  
+    if (!sslReadExact(ssl, &pkt.header, sizeof(PacketHeader)))
     {
         connected = false;
         return false;
     }
 
-    // Validate payload size before reading
+    
     if (pkt.header.size < 0 || pkt.header.size > MAX_PAYLOAD)
     {
         std::cout << "[ERROR] recvPacket: invalid payload size "
@@ -165,20 +189,18 @@ bool SocketHandler::recvPacket(DataPacket& pkt)
         return false;
     }
 
-    // 2. Read payload
+    
     if (pkt.header.size > 0)
     {
-        r = SSL_read(ssl, pkt.payload, pkt.header.size);
-        if (r <= 0)
+        if (!sslReadExact(ssl, pkt.payload, pkt.header.size))
         {
             connected = false;
             return false;
         }
     }
 
-    // 3. Read tail
-    r = SSL_read(ssl, &pkt.tail, sizeof(PacketTail));
-    if (r <= 0)
+   
+    if (!sslReadExact(ssl, &pkt.tail, sizeof(PacketTail)))
     {
         connected = false;
         return false;
@@ -188,7 +210,6 @@ bool SocketHandler::recvPacket(DataPacket& pkt)
     return true;
 }
 
-// disconnect
 
 void SocketHandler::disconnect()
 {
